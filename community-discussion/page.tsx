@@ -434,7 +434,7 @@ export default function CommunityDiscussionPage() {
                         </div>
                       )}
                       <FormDescription>
-                        選擇您的圖片 (每張最大 {MAX_FILE_SIZE_MB}MB)。
+                        選擇您的圖片 (最大總共1MB)。
                       </FormDescription>
                       <FormMessage />
                     </FormItem>
