@@ -34,27 +34,36 @@ import { useToast } from "@/hooks/use-toast";
 import { PlusCircle, Loader2, Star, CheckCircle, ArrowLeftCircle, ArrowRightCircle } from "lucide-react";
 
 // Firebase imports
-import { db, storage } from '@/lib/firebase';
-import { collection, addDoc, getDocs, query, orderBy, serverTimestamp, Timestamp, deleteDoc, doc as firestoreDoc, updateDoc } from 'firebase/firestore';
-import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
+import { db } from '@/lib/firebase'; // Removed storage import as new uploads go to Firestore
+import { collection, addDoc, getDocs, query, orderBy, serverTimestamp, Timestamp, deleteDoc, updateDoc } from 'firebase/firestore';
+// Removed storage-related imports: storageRef, uploadBytes, getDownloadURL, deleteObject
 import { v4 as uuidv4 } from 'uuid';
 
-
-const MAX_FILE_SIZE_MB = 5;
+const MAX_FILE_SIZE_MB = 999999999999;
 const MAX_FILES_COUNT = 5;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
 const ACCEPTED_IMAGE_TYPES = ["image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"];
+
+// Helper function to convert File to Base64 Data URI
+const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = (error) => reject(error);
+    });
+};
 
 const buildFormSchema = z.object({
     buildName: z.string().min(3, { message: "組裝名稱至少需要 3 個字元。" }),
     studentName: z.string().min(2, { message: "您的名稱至少需要 2 個字元。" }),
     description: z.string().optional(),
-    imageFiles: z
+    imageFiles: z // This field in the form will hold File objects for new uploads
         .array(z.instanceof(File))
-        .min(0, "")
         .max(MAX_FILES_COUNT, `您最多可以上傳 ${MAX_FILES_COUNT} 張圖片。`)
         .refine(
             (files) => {
+                if (!files || files.length === 0 && !buildFormSchema.isEditing) return true; // Allow empty if not editing and images are not mandatory
                 for (const file of files) {
                     if (file.size > MAX_FILE_SIZE_BYTES) return false;
                 }
@@ -64,13 +73,15 @@ const buildFormSchema = z.object({
         )
         .refine(
             (files) => {
+                if (!files || files.length === 0 && !buildFormSchema.isEditing) return true;
                 for (const file of files) {
                     if (!ACCEPTED_IMAGE_TYPES.includes(file.type)) return false;
                 }
                 return true;
             },
             "有圖片格式不受支援。僅支援 JPG, JPEG, PNG, WEBP, GIF。"
-        ),
+        )
+        .optional(), // Making it optional as existing builds might not re-upload
     primaryImageIndex: z.number().min(0).optional().default(0),
     cpu: z.string().optional(),
     motherboard: z.string().optional(),
@@ -81,7 +92,26 @@ const buildFormSchema = z.object({
     psu: z.string().optional(),
     pcCase: z.string().optional(),
     caseFans: z.string().optional(),
+}).refine(data => {
+    // When creating a new build, at least one image (via imageFiles) is required.
+    // When editing, imageFiles can be empty if existing images are kept.
+    // This logic might need refinement based on whether `managedImages` (representing existing + new) is empty.
+    // For now, we'll rely on the `onSubmit` logic to ensure there's at least one image if it's a new build.
+    return true;
+}, {
+    message: "請至少上傳一張圖片。",
+    path: ["imageFiles"], // This error message might be overridden by individual file checks
 });
+
+// Add a flag to the schema for context, not ideal but works for zodResolver
+// This is a bit of a hack; a custom resolver or form context might be cleaner
+declare module 'zod' {
+    interface ZodType {
+        isEditing?: boolean;
+    }
+}
+buildFormSchema.isEditing = false;
+
 
 type BuildFormValues = z.infer<typeof buildFormSchema>;
 
@@ -144,11 +174,8 @@ export default function CommunityPage() {
                     let primaryImageHint: string | undefined;
 
                     if (data.imageUrls && Array.isArray(data.imageUrls) && data.imageUrls.length > 0) {
-                        imageUrls = data.imageUrls;
+                        imageUrls = data.imageUrls; // These can be Storage URLs or Base64 Data URIs
                         primaryImageHint = data.primaryImageHint || (data.imageUrls.length > 1 ? "build gallery" : "build photo");
-                    } else if (data.imageUrl) {
-                        imageUrls = [data.imageUrl as string];
-                        primaryImageHint = data.imageHint || "build photo";
                     } else {
                         imageUrls = ["https://placehold.co/600x400.png"];
                         primaryImageHint = "custom build";
@@ -156,18 +183,13 @@ export default function CommunityPage() {
 
                     return {
                         id: docSnapshot.id,
-                        buildName: data.buildName ?? "未命名組裝",
-                        studentName: data.studentName ?? "匿名",
-                        description: data.description ?? "沒有提供描述。",
-                        imageUrls,
-                        primaryImageHint: primaryImageHint ?? "build photo",
-                        primaryImageIndex: typeof data.primaryImageIndex === 'number' ? data.primaryImageIndex : 0,
+                        ...data,
                         createdAt: createdAtString,
-                        uploaderEmail: data.uploaderEmail ?? undefined,
-                        components: Array.isArray(data.components)
-                            ? data.components
-                            : [], // 組件可以為空，但要存在
-                    } satisfies PcBuild;
+                        imageUrls: imageUrls,
+                        primaryImageHint: primaryImageHint,
+                        primaryImageIndex: data.primaryImageIndex !== undefined ? data.primaryImageIndex : 0,
+                        uploaderEmail: data.uploaderEmail || undefined,
+                    } as PcBuild;
                 });
                 setCommunityBuilds(buildsData);
             } catch (error) {
@@ -185,6 +207,7 @@ export default function CommunityPage() {
     }, [toast]);
 
     useEffect(() => {
+        buildFormSchema.isEditing = !!editingBuild; // Update schema context
         if (isDialogOpen && currentUserDisplayName && !editingBuild) {
             form.setValue('studentName', currentUserDisplayName, { shouldDirty: false, shouldValidate: false });
         }
@@ -196,11 +219,12 @@ export default function CommunityPage() {
 
     const handleEditBuild = (build: PcBuild) => {
         setEditingBuild(build);
+        buildFormSchema.isEditing = true; // Set context for Zod schema
         form.reset({
             buildName: build.buildName,
             studentName: build.studentName,
             description: build.description,
-            imageFiles: [],
+            imageFiles: [], // Clear file input, existing images are in managedImages
             primaryImageIndex: build.primaryImageIndex || 0,
             cpu: build.components.find(c => c.type === "CPU")?.name || "",
             motherboard: build.components.find(c => c.type === "Motherboard")?.name || "",
@@ -223,7 +247,6 @@ export default function CommunityPage() {
 
 
     const onSubmit: SubmitHandler<BuildFormValues> = async (data) => {
-        console.log("Form data on submit:", data);
         if (!userEmail && !editingBuild) {
             toast({
                 title: "請先登入",
@@ -233,70 +256,51 @@ export default function CommunityPage() {
             return;
         }
         setIsSubmittingBuild(true);
-        console.log("Submitting build. Editing mode:", !!editingBuild);
 
-        let uploadedImageUrls: string[] = [];
-        const newFilesToUpload = data.imageFiles.filter(file => file instanceof File);
+        const finalImageRepresentations: string[] = [];
 
-        if (newFilesToUpload.length > 0) {
-            console.log("New files to upload:", newFilesToUpload.length);
-            try {
-                // Sanitize email for path and handle null/undefined case
-                const userPathSegment = userEmail
-                    ? userEmail.replace(/\./g, '_').replace(/@/g, '_at_')
-                    : 'anonymous_builds';
-                console.log(`Using user path segment for storage: ${userPathSegment}`);
-
-                const uploadPromises = newFilesToUpload.map(async (file) => {
-                    const fileName = `${uuidv4()}-${file.name}`;
-                    const imagePath = `user_build_images/${userPathSegment}/${fileName}`;
-                    const imageRef = storageRef(storage, imagePath);
-                    console.log(`Uploading ${fileName} to Firebase Storage path: ${imagePath}...`);
-                    await uploadBytes(imageRef, file);
-                    const downloadURL = await getDownloadURL(imageRef);
-                    console.log(`Uploaded ${fileName}, URL: ${downloadURL}`);
-                    return downloadURL;
-                });
-                uploadedImageUrls = await Promise.all(uploadPromises);
-            } catch (error: any) {
-                console.error("Error uploading images to Firebase Storage:", error);
-                let toastMessage = `上傳圖片時發生錯誤: ${error.message || '未知錯誤'}`;
-                if (error.code === 'storage/unauthorized' || error.code === 'storage/object-not-found') {
-                    toastMessage = `圖片上傳失敗: ${error.message}. 請檢查 Firebase Storage 安全性規則或網路連線。`;
+        // Process images from managedImages to maintain order and convert new ones
+        for (const managedImage of managedImages) {
+            if (managedImage.file) { // This is a new or replaced image
+                try {
+                    // Validate file again just before conversion (optional, Zod should cover it)
+                    if (managedImage.file.size > MAX_FILE_SIZE_BYTES) {
+                        throw new Error(`圖片 "${managedImage.file.name}" 過大 (最大 ${MAX_FILE_SIZE_MB}MB)。`);
+                    }
+                    if (!ACCEPTED_IMAGE_TYPES.includes(managedImage.file.type)) {
+                        throw new Error(`圖片 "${managedImage.file.name}" 格式不受支援。`);
+                    }
+                    const base64String = await fileToBase64(managedImage.file);
+                    finalImageRepresentations.push(base64String);
+                } catch (error: any) {
+                    console.error("Error converting image to Base64:", error);
+                    toast({ title: "圖片處理失敗", description: error.message || `轉換圖片 ${managedImage.file?.name || ''} 時發生錯誤。`, variant: "destructive" });
+                    setIsSubmittingBuild(false);
+                    return;
                 }
-                toast({
-                    title: "圖片上傳失敗",
-                    description: toastMessage,
-                    variant: "destructive",
-                });
-                setIsSubmittingBuild(false);
-                return;
+            } else if (managedImage.previewUrl) { // This is an existing image URL (could be Storage URL or already Base64)
+                finalImageRepresentations.push(managedImage.previewUrl);
             }
-        } else if (editingBuild && editingBuild.imageUrls && editingBuild.imageUrls.length > 0) {
-            uploadedImageUrls = managedImages
-                .map(img => img.previewUrl)
-                .filter(url => typeof url === 'string' && url.startsWith("https://firebasestorage.googleapis.com/"));
-            console.log("Keeping existing images, potentially reordered:", uploadedImageUrls);
         }
 
 
+        if (finalImageRepresentations.length === 0) {
+            toast({
+                title: "缺少圖片",
+                description: "請至少包含一張圖片。", // Updated message
+                variant: "destructive",
+            });
+            setIsSubmittingBuild(false);
+            return;
+        }
 
-        const finalPrimaryImageIndex = data.primaryImageIndex < uploadedImageUrls.length ? data.primaryImageIndex : 0;
+        const finalPrimaryImageIndex = data.primaryImageIndex < finalImageRepresentations.length ? data.primaryImageIndex : 0;
 
-        let finalImageUrlsInOrder = [...uploadedImageUrls];
+        let finalImageUrlsInOrder = [...finalImageRepresentations];
         if (finalPrimaryImageIndex > 0 && finalPrimaryImageIndex < finalImageUrlsInOrder.length) {
             const primary = finalImageUrlsInOrder.splice(finalPrimaryImageIndex, 1)[0];
             finalImageUrlsInOrder.unshift(primary);
         }
-
-        console.log("Final image URLs to save (in order):", finalImageUrlsInOrder);
-        console.log("Other form data:", {
-            buildName: data.buildName,
-            studentName: data.studentName,
-            description: data.description,
-            cpu: data.cpu,
-            // ... (log other components if needed)
-        });
 
 
         const buildToSave: Omit<PcBuild, 'id' | 'createdAt'> & { createdAt?: any; uploaderEmail?: string } = {
@@ -304,8 +308,8 @@ export default function CommunityPage() {
             studentName: data.studentName,
             description: data.description || "沒有提供描述。",
             imageUrls: finalImageUrlsInOrder,
-            primaryImageHint: "uploaded build",
-            primaryImageIndex: 0,
+            primaryImageHint: "uploaded build", // Or a more dynamic hint
+            primaryImageIndex: 0, // After reordering, the primary image is always at index 0
             components: [
                 { type: "CPU", name: data.cpu || "未知" },
                 { type: "Motherboard", name: data.motherboard || "未知" },
@@ -316,7 +320,7 @@ export default function CommunityPage() {
                 { type: "PSU", name: data.psu || "未知" },
                 { type: "Case", name: data.pcCase || "未知" },
                 { type: "Case Fans", name: data.caseFans || "未知" },
-            ].filter(c => c.name !== "未知" || c.name.trim() !== ""),
+            ].filter(c => c.name !== "未知" && c.name.trim() !== ""),
         };
 
         if (userEmail) {
@@ -325,19 +329,25 @@ export default function CommunityPage() {
 
         try {
             if (editingBuild && editingBuild.id) {
-                console.log("Updating existing build:", editingBuild.id);
                 const buildDocRef = firestoreDoc(db, "builds", editingBuild.id);
-                await updateDoc(buildDocRef, buildToSave);
+                // For updates, we don't change createdAt server-side, but could add an `updatedAt` field
+                await updateDoc(buildDocRef, {
+                    ...buildToSave,
+                    updatedAt: serverTimestamp() // Example of adding an updatedAt field
+                });
                 toast({
                     title: "組裝更新成功！",
                     description: `您的組裝 "${data.buildName}" 已更新。`,
                 });
-                setCommunityBuilds(prevBuilds => prevBuilds.map(b => b.id === editingBuild.id ? { ...b, ...buildToSave, id: editingBuild.id, createdAt: b.createdAt } : b));
+                // Optimistically update local state
+                setCommunityBuilds(prevBuilds => prevBuilds.map(b =>
+                    b.id === editingBuild.id
+                        ? { ...b, ...buildToSave, id: editingBuild.id, createdAt: b.createdAt, primaryImageIndex: 0 } // ensure primaryImageIndex is updated
+                        : b
+                ));
             } else {
-                console.log("Adding new build to Firestore...");
                 buildToSave.createdAt = serverTimestamp();
                 const docRef = await addDoc(collection(db, "builds"), buildToSave);
-                console.log("New build added with ID:", docRef.id);
                 toast({
                     title: "組裝分享成功！",
                     description: `您的組裝 "${data.buildName}" 已提交。`,
@@ -346,6 +356,7 @@ export default function CommunityPage() {
                     id: docRef.id,
                     ...buildToSave,
                     createdAt: new Date().toLocaleDateString(),
+                    primaryImageIndex: 0,
                 };
                 setCommunityBuilds(prevBuilds => [newBuildForUI, ...prevBuilds]);
             }
@@ -355,16 +366,17 @@ export default function CommunityPage() {
             form.setValue('primaryImageIndex', 0);
             setIsDialogOpen(false);
             setEditingBuild(null);
+            buildFormSchema.isEditing = false; // Reset schema context
         } catch (error: any) {
             console.error("Error saving document to Firestore: ", error);
-            console.error("Full Firestore error object:", JSON.stringify(error, null, 2));
-            const isSizeError = error.message?.includes("longer than 1048487 bytes") || error.code === 'invalid-argument';
+            const isSizeError = error.message?.includes("longer than 1048487 bytes") || error.code === 'invalid-argument' || error.message?.includes("Entity too large");
             toast({
                 title: editingBuild ? "更新失敗" : "分享失敗",
                 description: isSizeError
-                    ? "儲存您的組裝時發生錯誤：資料量過大，請嘗試減少圖片數量或描述長度。"
+                    ? "儲存您的組裝時發生錯誤：圖片資料量過大，已超出 Firestore 文件限制 (1MB)。請嘗試減少圖片數量或使用較小解析度的圖片。"
                     : `儲存您的組裝時發生錯誤: ${error.message || '未知 Firestore 錯誤'}`,
                 variant: "destructive",
+                duration: 9000,
             });
         } finally {
             setIsSubmittingBuild(false);
@@ -375,21 +387,32 @@ export default function CommunityPage() {
     const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
         const files = event.target.files;
         if (!files) {
-            setManagedImages([]);
+            // If in edit mode and files are cleared, keep existing managed images
+            if (!editingBuild) {
+                setManagedImages([]);
+            }
             form.setValue("imageFiles", [], { shouldValidate: true });
             return;
         }
 
-        if (files.length > MAX_FILES_COUNT) {
-            form.setError("imageFiles", { type: "manual", message: `您最多可以上傳 ${MAX_FILES_COUNT} 張圖片。` });
+        if (files.length === 0 && !editingBuild) {
+            form.setError("imageFiles", { type: "manual", message: `請至少上傳一張圖片。` });
             setManagedImages([]);
             form.setValue("imageFiles", [], { shouldValidate: true });
             event.target.value = '';
             return;
         }
 
+        const currentImageCount = managedImages.filter(img => !img.file).length; // Count existing images not being replaced
+        if (currentImageCount + files.length > MAX_FILES_COUNT) {
+            form.setError("imageFiles", { type: "manual", message: `圖片總數不能超過 ${MAX_FILES_COUNT} 張。您已選擇 ${files.length} 張，目前有 ${currentImageCount} 張舊圖。` });
+            event.target.value = ''; // Clear the file input
+            return;
+        }
+
+
         let allFilesValid = true;
-        const newManagedImages: ManagedImage[] = [];
+        const newManagedImagesFromFileInput: ManagedImage[] = [];
         const fileObjectsForForm: File[] = [];
 
         for (let i = 0; i < files.length; i++) {
@@ -404,21 +427,43 @@ export default function CommunityPage() {
                 allFilesValid = false;
                 break;
             }
-            newManagedImages.push({ id: uuidv4(), file, previewUrl: URL.createObjectURL(file) });
+            newManagedImagesFromFileInput.push({ id: uuidv4(), file, previewUrl: URL.createObjectURL(file) });
             fileObjectsForForm.push(file);
         }
 
         if (!allFilesValid) {
-            setManagedImages([]);
-            form.setValue("imageFiles", [], { shouldValidate: true });
+            // Don't clear managedImages if invalid files are selected during an edit,
+            // just clear the file input and don't add the invalid files.
             event.target.value = '';
             return;
         }
 
         form.clearErrors("imageFiles");
-        setManagedImages(newManagedImages);
-        form.setValue("imageFiles", fileObjectsForForm, { shouldValidate: true });
-        form.setValue('primaryImageIndex', 0);
+        // When new files are selected, they replace all previous managed images or add to existing ones.
+        // If editing, we want to merge or replace. For simplicity now, let's assume new file selection replaces.
+        // A more robust solution would allow adding to existing or replacing specific ones.
+        // For now, if new files are chosen, they become the new set of managedImages.
+        // If editing and want to keep old + add new, this logic needs refinement.
+        // The current `managedImages` state is crucial.
+
+        // Let's try to append new files to existing ones if editing, respecting MAX_FILES_COUNT
+        if (editingBuild) {
+            const combinedImages = [...managedImages.filter(img => !img.file), ...newManagedImagesFromFileInput];
+            if (combinedImages.length > MAX_FILES_COUNT) {
+                form.setError("imageFiles", { type: "manual", message: `圖片總數不能超過 ${MAX_FILES_COUNT} 張。` });
+                event.target.value = '';
+                return;
+            }
+            setManagedImages(combinedImages);
+        } else {
+            setManagedImages(newManagedImagesFromFileInput);
+        }
+
+        form.setValue("imageFiles", fileObjectsForForm, { shouldValidate: true }); // This should be the new File[] objects
+        // Only reset primaryImageIndex if it's not an edit or if it becomes invalid
+        if (!editingBuild || form.getValues('primaryImageIndex') >= (editingBuild ? managedImages.length : newManagedImagesFromFileInput.length)) {
+            form.setValue('primaryImageIndex', 0);
+        }
     };
 
     const handleSetCoverImage = (index: number) => {
@@ -442,7 +487,9 @@ export default function CommunityPage() {
 
         setManagedImages(newImages);
         form.setValue('primaryImageIndex', newPrimaryIndex);
-        form.setValue('imageFiles', newImages.map(img => img.file).filter(file => file !== null) as File[], { shouldValidate: true });
+        // Update imageFiles in form state if needed, though direct manipulation of managedImages is main driver
+        const newFileArray = newImages.map(img => img.file).filter(file => file !== null) as File[];
+        form.setValue('imageFiles', newFileArray, { shouldValidate: true });
     };
 
 
@@ -471,8 +518,12 @@ export default function CommunityPage() {
                         });
                         setManagedImages([]);
                         setEditingBuild(null);
-                    } else if (currentUserDisplayName && !editingBuild) {
-                        form.setValue('studentName', currentUserDisplayName);
+                        buildFormSchema.isEditing = false; // Reset schema context
+                    } else {
+                        buildFormSchema.isEditing = !!editingBuild; // Set schema context
+                        if (currentUserDisplayName && !editingBuild) {
+                            form.setValue('studentName', currentUserDisplayName);
+                        }
                     }
                 }}>
                     <DialogTrigger asChild>
@@ -536,10 +587,10 @@ export default function CommunityPage() {
 
                                 <FormField
                                     control={form.control}
-                                    name="imageFiles"
-                                    render={({ field: { ref, name, onBlur, value, onChange: onFieldChange } }) => (
+                                    name="imageFiles" // This name corresponds to the File[] input
+                                    render={({ field: { ref, name, onBlur } }) => (
                                         <FormItem>
-                                            <FormLabel>上傳圖片 (最多 {MAX_FILES_COUNT} 張) </FormLabel>
+                                            <FormLabel>上傳圖片 (最多 {MAX_FILES_COUNT} 張) {editingBuild ? "(可選，以替換或新增)" : "*"} </FormLabel>
                                             <FormControl>
                                                 <Input
                                                     type="file"
@@ -602,7 +653,8 @@ export default function CommunityPage() {
                                                 </div>
                                             )}
                                             <FormDescription>
-                                                選擇您的組裝圖片 (每張最大 {MAX_FILE_SIZE_MB}MB)。
+                                                選擇您的組裝圖片 (每張最大 { }MB)。{editingBuild ? "新增或替換圖片。" : "至少上傳一張。"}
+                                                <br />注意：圖片將以 Base64 格MAX_FILE_SIZE_MB式儲存於資料庫，過大的圖片可能導致儲存失敗。
                                             </FormDescription>
                                             <FormMessage />
                                         </FormItem>
@@ -627,6 +679,7 @@ export default function CommunityPage() {
                                             form.reset();
                                             setManagedImages([]);
                                             setEditingBuild(null);
+                                            buildFormSchema.isEditing = false;
                                             const fileInput = document.getElementById('imageFiles') as HTMLInputElement | null;
                                             if (fileInput) fileInput.value = '';
                                         }}>
@@ -679,4 +732,3 @@ export default function CommunityPage() {
         </div>
     );
 }
-
