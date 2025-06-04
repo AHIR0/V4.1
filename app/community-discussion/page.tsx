@@ -431,8 +431,7 @@ export default function CommunityDiscussionPage() {
                                                 </div>
                                             )}
                                             <FormDescription>
-                                                選擇您的圖片 (每張最大 {MAX_FILE_SIZE_MB}MB)。
-                                                <br />注意：圖片將以 Base64 格式儲存於資料庫，過大的圖片可能導致儲存失敗。
+                                                選擇您的圖片 (最大總共 1MB)。
                                             </FormDescription>
                                             <FormMessage />
                                         </FormItem>
