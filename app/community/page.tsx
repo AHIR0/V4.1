@@ -653,8 +653,7 @@ export default function CommunityPage() {
                                                 </div>
                                             )}
                                             <FormDescription>
-                                                選擇您的組裝圖片 (每張最大 { }MB)。{editingBuild ? "新增或替換圖片。" : "至少上傳一張。"}
-                                                <br />注意：圖片將以 Base64 格MAX_FILE_SIZE_MB式儲存於資料庫，過大的圖片可能導致儲存失敗。
+                                                選擇您的組裝圖片 (最大共1MB)。{editingBuild ? "新增或替換圖片。" : "至少上傳一張。"}
                                             </FormDescription>
                                             <FormMessage />
                                         </FormItem>
