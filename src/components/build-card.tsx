@@ -33,14 +33,15 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
+  AlertDialogTrigger, // Added AlertDialogTrigger here
 } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button";
-import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area"; // Corrected import
+import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import React, { useState, useEffect } from "react";
 import { db, storage } from '@/lib/firebase';
 import { doc, deleteDoc } from 'firebase/firestore';
-import { ref as storageRef, deleteObject } from 'firebase/storage'; // Removed listAll as it's not used for simple deletion by URL
+import { ref as storageRef, deleteObject } from 'firebase/storage';
 import { useToast } from "@/hooks/use-toast";
 
 
@@ -129,8 +130,7 @@ export function BuildCard({ build, currentUserEmail, onBuildDeleted, onBuildEdit
                     const pathSegments = new URL(imageUrl).pathname.split('/o/');
                     if (pathSegments.length > 1) {
                         const decodedPath = decodeURIComponent(pathSegments[1].split('?')[0]);
-                        // Check if it's in the expected user_build_images path
-                        if (decodedPath.startsWith(`user_build_images/`)) { // Simplified check
+                        if (decodedPath.startsWith(`user_build_images/`)) { 
                            const directPathRef = storageRef(storage, decodedPath);
                            await deleteObject(directPathRef);
                            console.log(`Deleted image from Storage via constructed path: ${decodedPath}`);
@@ -268,7 +268,6 @@ export function BuildCard({ build, currentUserEmail, onBuildDeleted, onBuildEdit
         </CardFooter>
       </Card>
 
-      {/* This Dialog is the "View Details" dialog, triggered by the Badge above OR the Card image. */}
       <DialogContent
         className={cn(
           "w-11/12 sm:max-w-xl md:max-w-3xl lg:max-w-5xl xl:max-w-6xl",
@@ -356,7 +355,6 @@ export function BuildCard({ build, currentUserEmail, onBuildDeleted, onBuildEdit
 
           <div>
             <h3 className="text-base sm:text-lg font-semibold mb-2 sm:mb-3 text-primary">零組件清單</h3>
-            {/* Removed max-h from ScrollArea, relying on parent for scrolling */}
             <ScrollArea className="pr-2 sm:pr-4">
               <ul className="space-y-1.5 sm:space-y-2">
                 {build.components.map((component, index) => {
@@ -364,9 +362,9 @@ export function BuildCard({ build, currentUserEmail, onBuildDeleted, onBuildEdit
                   return (
                     <li key={index} className="flex items-start p-1.5 sm:p-2 border rounded-md bg-muted/50 hover:bg-muted/80 transition-colors">
                       <Icon className="mr-2 sm:mr-3 h-4 w-4 sm:h-5 sm:w-5 text-accent flex-shrink-0 mt-0.5" />
-                      <div className="min-w-0"> {/* Added min-w-0 for flex child to allow wrapping */}
+                      <div className="min-w-0"> 
                         <span className="font-semibold text-xs sm:text-sm text-card-foreground">{component.type}: </span>
-                        <span className="text-xs sm:text-sm text-muted-foreground break-all">{component.name}</span> {/* Added break-all for long names */}
+                        <span className="text-xs sm:text-sm text-muted-foreground break-all">{component.name}</span> 
                       </div>
                     </li>
                   );
@@ -375,7 +373,7 @@ export function BuildCard({ build, currentUserEmail, onBuildDeleted, onBuildEdit
                   <p className="text-xs sm:text-sm text-muted-foreground">此組裝未列出任何零組件。</p>
                 )}
               </ul>
-              <ScrollBar orientation="vertical" /> {/* Added vertical scrollbar */}
+              <ScrollBar orientation="vertical" /> 
             </ScrollArea>
           </div>
         </div>
